@@ -43,7 +43,7 @@ FRAME_RECOMMENDATIONS = {
                 "reason": "Tiny lenses look disproportionate on an oval face and break its balanced silhouette.",
             },
         ],
-        "tip": "Almost any shape works for oval — focus on finding a frame width that matches or slightly exceeds your face width.",
+        "tip": "Focus on frame width — look for a pair that matches or slightly exceeds your face width for the most balanced look.",
     },
 
     "round": {
@@ -117,7 +117,7 @@ FRAME_RECOMMENDATIONS = {
                 "reason": "Hard hexagonal or angular shapes amplify the face's existing strong structure.",
             },
         ],
-        "tip": "Choose frames that sit high on the nose and have a narrow or rimless bottom — this lifts attention away from the jaw.",
+        "tip": "Frames that sit high on the nose with a narrow or rimless bottom draw the eye upward and create a more balanced silhouette.",
     },
 
     "heart": {
@@ -154,7 +154,7 @@ FRAME_RECOMMENDATIONS = {
                 "reason": "Embellishments or thick top rims draw the eye upward, emphasising forehead width.",
             },
         ],
-        "tip": "Look for frames that are wider at the bottom or have a low bridge — this shifts visual focus downward to the chin.",
+        "tip": "Look for frames that are wider at the bottom or have a low bridge — this shifts visual focus to the lower half of your face.",
     },
 
     "oblong": {
@@ -195,7 +195,7 @@ FRAME_RECOMMENDATIONS = {
                 "reason": "Tall rectangular lenses add vertical height and elongate the face further.",
             },
         ],
-        "tip": "Choose frames with a strong horizontal line — thick top bars, wide temples, or decorative sides all help add the width you need.",
+        "tip": "Choose frames with a strong horizontal line — thick top bars, wide temples, or decorative sides all add visual presence.",
     },
 }
 
