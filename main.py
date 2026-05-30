@@ -9,10 +9,9 @@ from recommendations import get_recommendation
 app = FastAPI(
     title="FrameHub API",
     description="Face shape detection and glasses frame recommendations.",
-    version="0.2.0",
+    version="0.3.0",
 )
 
-# Allow requests from the mobile app / browser
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -23,16 +22,51 @@ app.add_middleware(
 mp_face_mesh = mp.solutions.face_mesh
 
 # ---------------------------------------------------------------------------
-# Face shape detection
+# Internal helpers
 # ---------------------------------------------------------------------------
 
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
+# Styles excluded from recommendations for likely-male users.
+# Checked as a case-insensitive substring against the style name.
+_CAT_EYE_TERMS = {"cat-eye", "cat eye"}
 
-def detect_face_shape(image_bytes: bytes) -> str:
+
+def _estimate_gender(jaw_ratio: float, height_ratio: float) -> str:
     """
-    Runs MediaPipe FaceMesh on the image bytes and returns one of:
-    oval | round | square | heart | oblong | no_face_detected
+    Estimates likely gender from facial geometry ratios extracted by MediaPipe.
+
+    Returns 'male', 'female', or 'unknown'. Conservative by design —
+    returns 'unknown' whenever signals are ambiguous so that frame
+    recommendations are never incorrectly narrowed.
+
+    Never exposed in the app interface or API response.
+    """
+    # Wide jaw + face not too elongated → strong male indicator.
+    # jaw_ratio ≥ 0.90 sits well above the female mean (~0.80–0.86)
+    # and catches most structurally square / broad male faces.
+    if jaw_ratio >= 0.90 and height_ratio < 1.50:
+        return "male"
+
+    # Distinctly narrow jaw → female indicator (heart / soft oval faces).
+    if jaw_ratio < 0.79:
+        return "female"
+
+    # Ambiguous mid-range — default to unknown to avoid false exclusions.
+    return "unknown"
+
+
+def _is_cat_eye(style: str) -> bool:
+    s = style.lower()
+    return any(term in s for term in _CAT_EYE_TERMS)
+
+
+def _analyse_face(image_bytes: bytes) -> tuple[str, str]:
+    """
+    Runs MediaPipe FaceMesh on the image and returns (shape, gender).
+
+    shape  — one of: oval | round | square | heart | oblong | no_face_detected
+    gender — one of: male | female | unknown
     """
     np_arr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
@@ -46,59 +80,60 @@ def detect_face_shape(image_bytes: bytes) -> str:
         results = face_mesh.process(rgb)
 
         if not results.multi_face_landmarks:
-            return "no_face_detected"
+            return "no_face_detected", "unknown"
 
         landmarks = results.multi_face_landmarks[0].landmark
         h, w, _ = img.shape
 
-        # Key landmark indices (calibrated against real MediaPipe measurements)
+        # ── Landmark indices ─────────────────────────────────────────────────
         # 10  = forehead top centre
         # 152 = chin bottom
-        # 234 = widest left cheek point  (reference width baseline)
+        # 234 = widest left cheek point  (bizygomatic baseline)
         # 454 = widest right cheek point
         # 172 = left jaw angle
         # 397 = right jaw angle
-        # 54  = left outer brow/forehead  (NOT 21 — that's the temple, ~96 % of cheek width)
-        # 284 = right outer brow/forehead (mirror of 54)
-        face_top      = landmarks[10]
-        face_bot      = landmarks[152]
-        cheek_l       = landmarks[234]
-        cheek_r       = landmarks[454]
-        jaw_l         = landmarks[172]
-        jaw_r         = landmarks[397]
-        forehead_l    = landmarks[54]
-        forehead_r    = landmarks[284]
+        # 54  = left outer forehead/brow
+        # 284 = right outer forehead/brow
+        face_top   = landmarks[10]
+        face_bot   = landmarks[152]
+        cheek_l    = landmarks[234]
+        cheek_r    = landmarks[454]
+        jaw_l      = landmarks[172]
+        jaw_r      = landmarks[397]
+        forehead_l = landmarks[54]
+        forehead_r = landmarks[284]
 
         face_height    = abs(face_top.y   - face_bot.y)   * h
         cheek_width    = abs(cheek_l.x    - cheek_r.x)    * w
         jaw_width      = abs(jaw_l.x      - jaw_r.x)      * w
         forehead_width = abs(forehead_l.x - forehead_r.x) * w
 
-        # All ratios are normalised to cheek_width so they are scale-invariant.
-        height_ratio   = face_height    / cheek_width   # typical selfie: 1.20–1.55
-        jaw_ratio      = jaw_width      / cheek_width   # typical selfie: 0.76–0.92
-        forehead_ratio = forehead_width / cheek_width   # typical selfie: 0.83–0.93
+        height_ratio   = face_height    / cheek_width
+        jaw_ratio      = jaw_width      / cheek_width
+        forehead_ratio = forehead_width / cheek_width
 
-        # Decision tree — oval is the *fallback*, not an easy-hit middle branch.
-        #
-        # oblong : noticeably tall face
+        # ── Face shape ───────────────────────────────────────────────────────
         if height_ratio > 1.55:
-            return "oblong"
+            shape = "oblong"
+        elif jaw_ratio < 0.76 and forehead_ratio > (jaw_ratio + 0.08):
+            shape = "heart"
+        elif jaw_ratio > 0.87 and height_ratio < 1.40:
+            shape = "square"
+        elif height_ratio < 1.25:
+            shape = "round"
+        else:
+            shape = "oval"
 
-        # heart  : narrow jaw, wide forehead  (pointy-chin / widow's-peak look)
-        if jaw_ratio < 0.76 and forehead_ratio > (jaw_ratio + 0.08):
-            return "heart"
+        # ── Gender estimation (internal only) ────────────────────────────────
+        gender = _estimate_gender(jaw_ratio, height_ratio)
 
-        # square : strong wide jaw, face not too tall
-        if jaw_ratio > 0.87 and height_ratio < 1.40:
-            return "square"
+        return shape, gender
 
-        # round  : face is short / wide relative to cheeks
-        if height_ratio < 1.25:
-            return "round"
 
-        # oval   : proportionate — taller than round, no dominant jaw or narrow chin
-        return "oval"
+def detect_face_shape(image_bytes: bytes) -> str:
+    """Public helper used by /detect — returns shape only."""
+    shape, _ = _analyse_face(image_bytes)
+    return shape
 
 
 # ---------------------------------------------------------------------------
@@ -107,7 +142,7 @@ def detect_face_shape(image_bytes: bytes) -> str:
 
 @app.get("/", tags=["Health"])
 def root():
-    return {"status": "FrameHub backend running", "version": "0.2.0"}
+    return {"status": "FrameHub backend running", "version": "0.3.0"}
 
 
 @app.post("/detect", tags=["Detection"])
@@ -141,8 +176,6 @@ async def recommend(face_shape: str):
     Pass `face_shape` as a query parameter:  `/recommend?face_shape=oval`
 
     Supported shapes: `oval`, `round`, `square`, `heart`, `oblong`
-
-    Returns a full style profile with recommended frames, frames to avoid, and a tip.
     """
     valid_shapes = {"oval", "round", "square", "heart", "oblong"}
     if face_shape.lower() not in valid_shapes:
@@ -157,8 +190,7 @@ async def recommend(face_shape: str):
 @app.post("/scan", tags=["Scan"])
 async def scan(file: UploadFile = File(...)):
     """
-    All-in-one endpoint: upload a photo and get back both the detected
-    face shape **and** the full frame recommendations in one call.
+    All-in-one endpoint: upload a photo and get back the full frame recommendations.
 
     Returns:
     ```json
@@ -166,7 +198,7 @@ async def scan(file: UploadFile = File(...)):
       "face_shape": "oval",
       "description": "...",
       "recommended": [ { "style": "Aviator", "reason": "..." }, ... ],
-      "avoid":       [ { "style": "Oversized frames", "reason": "..." }, ... ],
+      "avoid":       [ { "style": "Narrow frames", "reason": "..." }, ... ],
       "tip": "..."
     }
     ```
@@ -180,7 +212,7 @@ async def scan(file: UploadFile = File(...)):
     contents = await file.read()
 
     try:
-        shape = detect_face_shape(contents)
+        shape, gender = _analyse_face(contents)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -190,4 +222,14 @@ async def scan(file: UploadFile = File(...)):
             detail="No face detected in the image. Please upload a clear, well-lit photo facing the camera.",
         )
 
-    return get_recommendation(shape)
+    reco = get_recommendation(shape)
+
+    # Remove cat-eye styles for likely-male users. All gender logic stays
+    # server-side; gender is never included in the response.
+    if gender == "male":
+        reco["recommended"] = [
+            item for item in reco["recommended"]
+            if not _is_cat_eye(item["style"])
+        ]
+
+    return reco
